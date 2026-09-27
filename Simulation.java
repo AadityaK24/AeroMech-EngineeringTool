@@ -48,11 +48,17 @@ public class Simulation {
 
         while (time < simulationTime) {
 
-            // Numerical integration
-            distance = distance + velocity * timeStep;
+            // Store velocity before this time step
+            double previousVelocity = velocity;
 
-            // Numerical integration
+            // Update velocity using numerical integration
             velocity = velocity + acceleration * timeStep;
+
+            // Trapezoidal integration for distance
+            distance = distance
+                    + 0.5
+                    * (previousVelocity + velocity)
+                    * timeStep;
 
             time = time + timeStep;
         }
