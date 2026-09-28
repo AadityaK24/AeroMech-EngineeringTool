@@ -1,7 +1,5 @@
-
 public class Aerodynamics 
 {
-
     private Aircraft aircraft;
     private Atmosphere atmosphere;
 
@@ -32,58 +30,31 @@ public class Aerodynamics
 
     private void calculateAerodynamics()
      {
-
         double density = atmosphere.getDensity();
         double velocity = aircraft.getVelocity();
         double wingArea = aircraft.getWingArea();
 
-        // Dynamic pressure:
-        // q = 1/2 * rho * V^2
- dynamicPressure = 0.5 * density * velocity * velocity;
+        dynamicPressure = 0.5 * density * velocity * velocity;
 
-        // Drag coefficient using a simplified drag polar:
-        // Cd = Cd0 + k * Cl^2
-        dragCoefficient = zeroLiftDragCoefficient + inducedDragFactor* liftCoefficient * liftCoefficient;
+        dragCoefficient = zeroLiftDragCoefficient + inducedDragFactor * liftCoefficient * liftCoefficient;
         
-        // Lift:
-        // L = q * S * Cl
         lift = dynamicPressure * wingArea * liftCoefficient;
 
-        // Drag:
-        // D = q * S * Cd
-        drag = dynamicPressure * wingArea* dragCoefficient;
+        drag = dynamicPressure * wingArea * dragCoefficient;
     }
 
-    public double getDynamicPressure() 
-    {
-        return dynamicPressure;
-    }
-
-    public double getLiftCoefficient() 
-    {
-        return liftCoefficient;
-    }
-
-    public double getDragCoefficient() 
-    {
-        return dragCoefficient;
-    }
-
-    public double getLift()
-    {
-        return lift;
-    }
-
-    public double getDrag()
-    {
-        return drag;
-    }
+    public double getDynamicPressure() { return dynamicPressure; }
+    public double getLiftCoefficient() { return liftCoefficient; }
+    public double getDragCoefficient() { return dragCoefficient; }
+    public double getZeroLiftDragCoefficient() { return zeroLiftDragCoefficient; }
+    public double getInducedDragFactor() { return inducedDragFactor; }
+    public double getLift() { return lift; }
+    public double getDrag() { return drag; }
 
     public double getLiftToDragRatio()
     {
         if (drag == 0) 
             return 0;
-         return lift / drag;
+        return lift / drag;
     }
 }
-
