@@ -1,10 +1,20 @@
 public class Simulation {
 
     private static final double GRAVITY = 9.80665;
-    private static final double MAX_FLIGHT_PATH_ANGLE = Math.toRadians(8.0);
-    private static final double FINAL_FLIGHT_PATH_ANGLE = Math.toRadians(-6.0);
     private static final double MIN_LIFT_COEFFICIENT = 0.05;
     private static final double MAX_LIFT_COEFFICIENT = 1.80;
+
+    private static final double MAX_CLIMB_ANGLE = Math.toRadians(14.0);
+    private static final double MAX_DESCENT_ANGLE = Math.toRadians(5.5);
+    private static final double MAX_ANGLE_RATE = Math.toRadians(7.5);
+
+    private enum FlightMode {
+        CUSTOM,
+        TAKE_OFF,
+        LANDING,
+        CRUISE,
+        HIGH_ALTITUDE
+    }
 
     private final Aircraft aircraft;
     private final double baseLiftCoefficient;
@@ -12,6 +22,7 @@ public class Simulation {
     private final double inducedDragFactor;
     private final double thrust;
     private final double exhaustVelocity;
+    private final FlightMode flightMode;
 
     private final double initialAltitude;
 
@@ -33,6 +44,7 @@ public class Simulation {
     private double liftToDragRatio;
     private double dynamicPressure;
     private double rateOfClimb;
+    private double profileClimbAngle;
 
     private boolean complete;
 
@@ -54,6 +66,7 @@ public class Simulation {
         this.inducedDragFactor = aerodynamics.getInducedDragFactor();
         this.thrust = propulsion.getThrust();
         this.exhaustVelocity = propulsion.getExhaustVelocity();
+        this.flightMode = FlightMode.CUSTOM;
         this.initialAltitude = Math.max(0.0, aircraft.getAltitude());
         this.timeStep = timeStep;
         this.simulationTime = simulationTime;
@@ -74,6 +87,33 @@ public class Simulation {
             double timeStep,
             double simulationTime) {
 
+        this(
+                aircraft,
+                liftCoefficient,
+                zeroLiftDragCoefficient,
+                inducedDragFactor,
+                thrust,
+                exhaustVelocity,
+                timeStep,
+                simulationTime,
+                "CUSTOM"
+        );
+    }
+
+    /**
+     * JavaFX constructor with an explicit flight profile.
+     */
+    public Simulation(
+            Aircraft aircraft,
+            double liftCoefficient,
+            double zeroLiftDragCoefficient,
+            double inducedDragFactor,
+            double thrust,
+            double exhaustVelocity,
+            double timeStep,
+            double simulationTime,
+            String flightMode) {
+
         if (aircraft == null) {
             throw new IllegalArgumentException("Aircraft cannot be null.");
         }
@@ -85,6 +125,7 @@ public class Simulation {
         this.inducedDragFactor = inducedDragFactor;
         this.thrust = thrust;
         this.exhaustVelocity = exhaustVelocity;
+        this.flightMode = parseFlightMode(flightMode);
         this.initialAltitude = Math.max(0.0, aircraft.getAltitude());
         this.timeStep = timeStep;
         this.simulationTime = simulationTime;
@@ -132,19 +173,25 @@ public class Simulation {
         double previousVelocity = Math.max(velocity, 0.1);
         double previousAltitude = altitude;
 
-        // Smoothly move from a positive climb angle to a negative descent angle.
-        // This gives the simulator a real, continuous flight path rather than
-        // a purely visual arc.
-        double progress = simulationTime <= 0.0
-                ? 1.0
-                : Math.min(1.0, time / simulationTime);
+        // Determine the target flight-path angle from the selected flight
+        // profile and the user's actual airspeed, thrust, altitude and
+        // aerodynamic inputs. Then move toward it smoothly.
+        double previousFlightPathAngle = flightPathAngle;
+        double targetFlightPathAngle = calculateTargetFlightPathAngle(
+                time,
+                previousVelocity,
+                previousAltitude
+        );
 
-        flightPathAngle = MAX_FLIGHT_PATH_ANGLE
-                + (FINAL_FLIGHT_PATH_ANGLE - MAX_FLIGHT_PATH_ANGLE) * progress;
+        double maxAngleChange = MAX_ANGLE_RATE * timeStep;
+        double angleChange = clamp(
+                targetFlightPathAngle - previousFlightPathAngle,
+                -maxAngleChange,
+                maxAngleChange
+        );
 
-        flightPathAngleRate =
-                (FINAL_FLIGHT_PATH_ANGLE - MAX_FLIGHT_PATH_ANGLE)
-                / simulationTime;
+        flightPathAngle = previousFlightPathAngle + angleChange;
+        flightPathAngleRate = angleChange / Math.max(timeStep, 1.0e-9);
 
         // Recalculate the atmosphere at the current altitude.
         aircraft.setVelocity(previousVelocity);
@@ -235,6 +282,19 @@ public class Simulation {
 
         if (time >= simulationTime) {
             time = simulationTime;
+
+            // For landing-capable profiles, treat the final few metres as
+            // touchdown so the visual run terminates on the runway rather
+            // than hanging slightly above ground because of the finite step.
+            if ((flightMode == FlightMode.LANDING
+                    || flightMode == FlightMode.CUSTOM)
+                    && altitude <= 35.0) {
+                altitude = 0.0;
+                flightPathAngle = 0.0;
+                flightPathAngleRate = 0.0;
+                rateOfClimb = 0.0;
+            }
+
             complete = true;
         }
 
@@ -251,10 +311,8 @@ public class Simulation {
         distance = 0.0;
         velocity = Math.max(0.1, aircraft.getVelocity());
         altitude = initialAltitude;
-        flightPathAngle = MAX_FLIGHT_PATH_ANGLE;
-        flightPathAngleRate =
-                (FINAL_FLIGHT_PATH_ANGLE - MAX_FLIGHT_PATH_ANGLE)
-                / simulationTime;
+        flightPathAngle = 0.0;
+        flightPathAngleRate = 0.0;
         acceleration = 0.0;
         liftCoefficient = baseLiftCoefficient;
         lift = 0.0;
@@ -265,7 +323,392 @@ public class Simulation {
         rateOfClimb = 0.0;
         complete = false;
 
+        profileClimbAngle = estimateClimbAngle(
+                velocity,
+                altitude
+        );
+
         updateCurrentState();
+    }
+
+
+    /**
+     * Returns the target flight-path angle for a future point in the run.
+     * This is also used by Main.java to draw the projected path, so the
+     * visualization and the physics use the same flight-profile rules.
+     */
+    public double getProjectedFlightPathAngle(
+            double futureTime,
+            double projectedVelocity,
+            double projectedAltitude) {
+
+        return calculateTargetFlightPathAngle(
+                futureTime,
+                Math.max(0.1, projectedVelocity),
+                Math.max(0.0, projectedAltitude)
+        );
+    }
+
+    private double calculateTargetFlightPathAngle(
+            double queryTime,
+            double currentVelocity,
+            double currentAltitude) {
+
+        double progress = clamp(
+                queryTime / Math.max(simulationTime, 1.0e-9),
+                0.0,
+                1.0
+        );
+
+        switch (flightMode) {
+            case TAKE_OFF:
+                return takeOffAngle(
+                        progress,
+                        currentVelocity,
+                        currentAltitude
+                );
+
+            case LANDING:
+                return landingAngle(
+                        queryTime,
+                        currentVelocity,
+                        currentAltitude
+                );
+
+            case CRUISE:
+                return cruiseAngle(
+                        progress
+                );
+
+            case HIGH_ALTITUDE:
+                return highAltitudeAngle(
+                        progress,
+                        currentVelocity,
+                        currentAltitude
+                );
+
+            case CUSTOM:
+            default:
+                return customMissionAngle(
+                        queryTime,
+                        progress,
+                        currentVelocity,
+                        currentAltitude
+                );
+        }
+    }
+
+    private double takeOffAngle(
+            double progress,
+            double currentVelocity,
+            double currentAltitude) {
+
+        // Short runway / rotation phase.
+        if (progress < 0.08) {
+            return Math.toRadians(0.5);
+        }
+
+        // Climb using the user's propulsion and aerodynamic inputs.
+        if (progress < 0.30) {
+            double climbAngle = profileClimbAngle;
+            double local = smoothStep(
+                    (progress - 0.08) / 0.22
+            );
+            return climbAngle * local;
+        }
+
+        // Stabilization: smoothly return to level flight.
+        if (progress < 0.50) {
+            double climbAngle = profileClimbAngle;
+            double local = smoothStep(
+                    (progress - 0.30) / 0.20
+            );
+            return climbAngle * (1.0 - local);
+        }
+
+        return 0.0;
+    }
+
+    private double landingAngle(
+            double queryTime,
+            double currentVelocity,
+            double currentAltitude) {
+
+        if (currentAltitude <= 0.5) {
+            return 0.0;
+        }
+
+        /*
+         * Planned, shallow approach. Instead of tying the descent to a
+         * percentage of the total run, calculate the angle required to
+         * reach the flare zone during the time that remains. This makes
+         * 2, 3, 4 and 5 minute landings use the same natural approach
+         * geometry instead of producing an end-of-run dive or stopping
+         * above the runway.
+         */
+        final double flareAltitude = 35.0;
+        final double flareTime = 12.0;
+        final double cruiseMinimumAngle = Math.toRadians(1.5);
+
+        if (currentAltitude <= flareAltitude) {
+            // Hold a small, progressively shallower approach through the
+            // flare instead of reducing the descent rate to almost zero
+            // hundreds of metres above the runway.
+            double altitudeFactor = clamp(
+                    currentAltitude / flareAltitude,
+                    0.0,
+                    1.0
+            );
+
+            double flareAngle =
+                    Math.toRadians(1.0)
+                    + Math.toRadians(3.2) * altitudeFactor;
+
+            return -flareAngle;
+        }
+
+        double remainingTime =
+                Math.max(1.0, simulationTime - queryTime);
+
+        double usableTime =
+                Math.max(1.0, remainingTime - flareTime);
+
+        double velocity = Math.max(
+                currentVelocity,
+                20.0
+        );
+
+        // Required average descent rate to reach the flare altitude.
+        double requiredRate =
+                Math.max(
+                        0.0,
+                        (currentAltitude - flareAltitude)
+                                / usableTime
+                );
+
+        double angleMagnitude =
+                Math.asin(
+                        clamp(
+                                requiredRate / velocity,
+                                0.0,
+                                Math.sin(MAX_DESCENT_ANGLE)
+                        )
+                );
+
+        // Prevent an almost-flat descent during very long runs. Once the
+        // aircraft is committed to the approach, keep it visibly stable
+        // rather than making it appear frozen in level flight.
+        if (angleMagnitude > 0.0
+                && angleMagnitude < cruiseMinimumAngle
+                && currentAltitude < 1500.0) {
+            angleMagnitude = cruiseMinimumAngle;
+        }
+
+        return -angleMagnitude;
+    }
+
+    private double naturalLandingAngle(
+            double currentVelocity,
+            double currentAltitude) {
+
+        // Keep the approach shallow and stable. User speed and altitude
+        // determine when descent begins, while the approach angle itself
+        // stays within a natural landing envelope.
+        double angleDeg = 4.0;
+
+        return -Math.toRadians(angleDeg);
+    }
+
+    private double cruiseAngle(double progress) {
+        // Slight leveling transition, then stable cruise.
+        if (progress < 0.10) {
+            return Math.toRadians(2.0)
+                    * (1.0 - smoothStep(progress / 0.10));
+        }
+        return 0.0;
+    }
+
+    private double highAltitudeAngle(
+            double progress,
+            double currentVelocity,
+            double currentAltitude) {
+
+        // High-altitude profile climbs briefly, stabilizes, then remains
+        // near level for the remainder of the simulation.
+        if (progress < 0.20) {
+            double climbAngle = Math.min(
+                    profileClimbAngle,
+                    Math.toRadians(8.0)
+            );
+            return climbAngle
+                    * smoothStep(progress / 0.20);
+        }
+
+        if (progress < 0.35) {
+            double climbAngle = Math.min(
+                    profileClimbAngle,
+                    Math.toRadians(8.0)
+            );
+            return climbAngle
+                    * (1.0 - smoothStep((progress - 0.20) / 0.15));
+        }
+
+        return 0.0;
+    }
+
+    private double customMissionAngle(
+            double queryTime,
+            double progress,
+            double currentVelocity,
+            double currentAltitude) {
+
+        // 1. Take-off / rotation.
+        if (progress < 0.07) {
+            return Math.toRadians(0.5);
+        }
+
+        // 2. User-responsive climb.
+        if (progress < 0.28) {
+            double climbAngle = profileClimbAngle;
+
+            return climbAngle
+                    * smoothStep((progress - 0.07) / 0.21);
+        }
+
+        // 3. Stabilize at the top of the climb.
+        if (progress < 0.43) {
+            double climbAngle = profileClimbAngle;
+
+            return climbAngle
+                    * (1.0 - smoothStep((progress - 0.28) / 0.15));
+        }
+
+        // 4. Cruise.
+        if (progress < 0.60) {
+            return 0.0;
+        }
+
+        // 5. Use the same planned, shallow landing approach as the
+        // dedicated Landing profile. This keeps Custom proportional to
+        // the chosen inputs while guaranteeing the visual and physics
+        // projections follow the same descent logic.
+        if (currentAltitude > 0.5) {
+            return landingAngle(
+                    queryTime,
+                    currentVelocity,
+                    currentAltitude
+            );
+        }
+
+        return 0.0;
+    }
+
+    /**
+     * Estimates how much climb angle the current user inputs can support.
+     * More available thrust produces a larger climb angle; higher drag,
+     * larger wing drag and less favorable CL reduce it.
+     */
+    private double estimateClimbAngle(
+            double currentVelocity,
+            double currentAltitude) {
+
+        double velocity = Math.max(
+                currentVelocity,
+                0.1
+        );
+
+        double altitude = clamp(
+                currentAltitude,
+                0.0,
+                11000.0
+        );
+
+        Atmosphere atmosphere = new Atmosphere(altitude);
+        double density = atmosphere.getDensity();
+        double wingArea = aircraft.getWingArea();
+        double mass = aircraft.getMass();
+        double weight = mass * GRAVITY;
+
+        double q =
+                0.5
+                * density
+                * velocity
+                * velocity;
+
+        double dragCoefficient =
+                zeroLiftDragCoefficient
+                + inducedDragFactor
+                * baseLiftCoefficient
+                * baseLiftCoefficient;
+
+        double drag =
+                q
+                * wingArea
+                * dragCoefficient;
+
+        double excessThrust =
+                thrust
+                - drag;
+
+        if (excessThrust <= 0.0) {
+            return 0.0;
+        }
+
+        // Let CL influence the usable climb performance without allowing
+        // unrealistic values to dominate the simulation.
+        double liftEffect = clamp(
+                baseLiftCoefficient / 0.82,
+                0.70,
+                1.30
+        );
+
+        double climbRatio = clamp(
+                (excessThrust / weight)
+                * liftEffect,
+                0.0,
+                Math.sin(MAX_CLIMB_ANGLE)
+        );
+
+        return Math.asin(climbRatio);
+    }
+
+    private double smoothStep(double x) {
+        x = clamp(x, 0.0, 1.0);
+        return x * x * (3.0 - 2.0 * x);
+    }
+
+    private FlightMode parseFlightMode(String mode) {
+        if (mode == null) {
+            return FlightMode.CUSTOM;
+        }
+
+        switch (mode.trim().toUpperCase()) {
+            case "TAKE-OFF":
+            case "TAKEOFF":
+                return FlightMode.TAKE_OFF;
+
+            case "LANDING":
+                return FlightMode.LANDING;
+
+            case "CRUISE":
+                return FlightMode.CRUISE;
+
+            case "HIGH ALTITUDE":
+            case "HIGH_ALTITUDE":
+                return FlightMode.HIGH_ALTITUDE;
+
+            case "CUSTOM":
+            default:
+                return FlightMode.CUSTOM;
+        }
+    }
+
+    private double clamp(
+            double value,
+            double min,
+            double max) {
+
+        return Math.max(min, Math.min(max, value));
     }
 
     private void updateCurrentState() {
@@ -341,6 +784,7 @@ public class Simulation {
     public double getSimulationTime() { return simulationTime; }
     public double getFlightPathAngle() { return flightPathAngle; }
     public double getLiftCoefficient() { return liftCoefficient; }
+    public String getFlightMode() { return flightMode.name(); }
 
     public State getState() {
         return new State(
